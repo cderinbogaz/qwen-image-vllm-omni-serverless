@@ -5,6 +5,7 @@ import logging
 import os
 import shlex
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -46,7 +47,32 @@ _bootstrap_log(
     "env snapshot\n"
     + "\n".join(f"{key}={os.getenv(key)}" for key in _BOOTSTRAP_ENV_KEYS)
 )
-LIVE_WORKER_ENV = bool(os.getenv("RUNPOD_POD_ID")) and bool(os.getenv("RUNPOD_WEBHOOK_GET_JOB"))
+SYSTEM_HOSTNAME = socket.gethostname()
+
+
+def _derive_worker_pod_id() -> str:
+    for candidate in (
+        os.getenv("RUNPOD_POD_ID"),
+        os.getenv("RUNPOD_POD_HOSTNAME"),
+        SYSTEM_HOSTNAME,
+    ):
+        if candidate:
+            return candidate.split(".", 1)[0].split("-", 1)[0]
+    return ""
+
+
+WORKER_POD_ID = _derive_worker_pod_id()
+WORKER_HOSTNAME = os.getenv("RUNPOD_POD_HOSTNAME") or SYSTEM_HOSTNAME
+LIVE_WORKER_ENV = bool(os.getenv("RUNPOD_AI_API_ID")) and bool(os.getenv("RUNPOD_WEBHOOK_GET_JOB")) and bool(
+    WORKER_POD_ID
+)
+_bootstrap_log(
+    "resolved worker identity\n"
+    f"SYSTEM_HOSTNAME={SYSTEM_HOSTNAME}\n"
+    f"WORKER_HOSTNAME={WORKER_HOSTNAME}\n"
+    f"WORKER_POD_ID={WORKER_POD_ID}\n"
+    f"LIVE_WORKER_ENV={LIVE_WORKER_ENV}"
+)
 
 try:
     import requests
@@ -447,7 +473,7 @@ def handle_job(job: dict[str, Any]) -> dict[str, Any]:
 
 def _format_webhook_url(template: str, *, job_id: str = "") -> str:
     replacements = {
-        "$RUNPOD_POD_ID": os.getenv("RUNPOD_POD_ID", ""),
+        "$RUNPOD_POD_ID": WORKER_POD_ID,
         "$RUNPOD_GPU_TYPE_ID": os.getenv("RUNPOD_GPU_TYPE_ID", ""),
         "$ID": job_id,
     }
@@ -562,8 +588,8 @@ def _run_direct_worker_loop() -> None:
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
                     "error_traceback": traceback.format_exc(),
-                    "hostname": os.getenv("RUNPOD_POD_HOSTNAME", "unknown"),
-                    "worker_id": os.getenv("RUNPOD_POD_ID", "unknown"),
+                    "hostname": WORKER_HOSTNAME,
+                    "worker_id": WORKER_POD_ID or "unknown",
                     "runpod_version": RUNPOD_VERSION,
                 }
                 payload = {"error": json.dumps(error_info)}
