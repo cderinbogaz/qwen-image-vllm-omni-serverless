@@ -7,13 +7,40 @@ import signal
 import subprocess
 import threading
 import time
+import traceback
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
-import requests
-import runpod
-from PIL import Image
+_BOOTSTRAP_LOG_PATHS = (
+    "/runpod-volume/vllm-omni-bootstrap.log",
+    "/tmp/vllm-omni-bootstrap.log",
+)
+
+
+def _bootstrap_log(message: str) -> None:
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"{timestamp} {message}\n"
+    for path in _BOOTSTRAP_LOG_PATHS:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(line)
+        except Exception:
+            continue
+
+
+_bootstrap_log("handler import starting")
+
+try:
+    import requests
+    import runpod
+    from PIL import Image
+except Exception:
+    _bootstrap_log("dependency import failed\n" + traceback.format_exc())
+    raise
+
+_bootstrap_log("dependency import completed")
 
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -393,4 +420,10 @@ def handle_job(job: dict[str, Any]) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    runpod.serverless.start({"handler": handle_job})
+    _bootstrap_log("runpod serverless start entering")
+    try:
+        runpod.serverless.start({"handler": handle_job})
+        _bootstrap_log("runpod serverless start returned")
+    except Exception:
+        _bootstrap_log("runpod serverless start crashed\n" + traceback.format_exc())
+        raise
