@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 import logging
 import os
 import shlex
@@ -16,6 +17,16 @@ _BOOTSTRAP_LOG_PATHS = (
     "/runpod-volume/vllm-omni-bootstrap.log",
     "/tmp/vllm-omni-bootstrap.log",
 )
+_BOOTSTRAP_ENV_KEYS = (
+    "RUNPOD_AI_API_ID",
+    "RUNPOD_ENDPOINT_ID",
+    "RUNPOD_POD_ID",
+    "RUNPOD_POD_HOSTNAME",
+    "RUNPOD_REALTIME_PORT",
+    "RUNPOD_REALTIME_CONCURRENCY",
+    "RUNPOD_WEBHOOK_GET_JOB",
+    "RUNPOD_WEBHOOK_PING",
+)
 
 
 def _bootstrap_log(message: str) -> None:
@@ -31,16 +42,29 @@ def _bootstrap_log(message: str) -> None:
 
 
 _bootstrap_log("handler import starting")
+_bootstrap_log(
+    "env snapshot\n"
+    + "\n".join(f"{key}={os.getenv(key)}" for key in _BOOTSTRAP_ENV_KEYS)
+)
+LIVE_WORKER_ENV = bool(os.getenv("RUNPOD_POD_ID")) and bool(os.getenv("RUNPOD_WEBHOOK_GET_JOB"))
 
 try:
     import requests
-    import runpod
     from PIL import Image
 except Exception:
     _bootstrap_log("dependency import failed\n" + traceback.format_exc())
     raise
 
+try:
+    import runpod
+except Exception:
+    runpod = None
+    _bootstrap_log("optional runpod import failed\n" + traceback.format_exc())
+    if not LIVE_WORKER_ENV:
+        raise
+
 _bootstrap_log("dependency import completed")
+RUNPOD_VERSION = getattr(runpod, "__version__", "unavailable")
 
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -60,6 +84,7 @@ IMAGES_URL = f"{SERVER_URL}/v1/images/generations"
 STARTUP_TIMEOUT_SECONDS = int(os.getenv("VLLM_STARTUP_TIMEOUT", "3600"))
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("VLLM_REQUEST_TIMEOUT", "1800"))
 DEFAULT_MODEL = os.getenv("VLLM_MODEL", "Qwen/Qwen-Image-2512")
+VLLM_PYTHON_BIN = os.getenv("VLLM_PYTHON_BIN", "python3")
 DEFAULT_SERVER_ARGS = os.getenv("VLLM_SERVER_ARGS", "--num-gpus 1 --vae-use-slicing --vae-use-tiling")
 DEFAULT_IMAGE_SIZE = os.getenv("DEFAULT_IMAGE_SIZE", "1328x1328")
 DEFAULT_NUM_INFERENCE_STEPS = int(os.getenv("DEFAULT_NUM_INFERENCE_STEPS", "50"))
@@ -73,6 +98,7 @@ _SERVER_PROCESS: subprocess.Popen[str] | None = None
 _SERVER_MODEL: str | None = None
 _SERVER_ARGS: tuple[str, ...] | None = None
 _SERVER_LOG_TAIL: deque[str] = deque(maxlen=LOG_TAIL_LINES)
+_WORKER_SESSION: requests.Session | None = None
 
 
 @dataclass(frozen=True)
@@ -251,7 +277,7 @@ def _start_server_locked(config: ResolvedServerConfig) -> None:
 
     _SERVER_LOG_TAIL.clear()
     command = [
-        "python3",
+        VLLM_PYTHON_BIN,
         "-m",
         "vllm_omni.entrypoints.cli.main",
         "serve",
@@ -419,11 +445,149 @@ def handle_job(job: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _format_webhook_url(template: str, *, job_id: str = "") -> str:
+    replacements = {
+        "$RUNPOD_POD_ID": os.getenv("RUNPOD_POD_ID", ""),
+        "$RUNPOD_GPU_TYPE_ID": os.getenv("RUNPOD_GPU_TYPE_ID", ""),
+        "$ID": job_id,
+    }
+    resolved = template
+    for source, target in replacements.items():
+        resolved = resolved.replace(source, target)
+    return resolved
+
+
+def _worker_session() -> requests.Session:
+    global _WORKER_SESSION
+    if _WORKER_SESSION is None:
+        session = requests.Session()
+        session.headers.update(
+            {
+                "Authorization": os.getenv("RUNPOD_AI_API_KEY", ""),
+                "User-Agent": f"vllm-omni-runpod/{RUNPOD_VERSION}",
+            }
+        )
+        _WORKER_SESSION = session
+    return _WORKER_SESSION
+
+
+def _send_ping_forever() -> None:
+    ping_template = os.getenv("RUNPOD_WEBHOOK_PING", "")
+    if not ping_template:
+        return
+
+    ping_url = _format_webhook_url(ping_template)
+    interval = max(int(os.getenv("RUNPOD_PING_INTERVAL", "4000")) // 1000, 1)
+    session = _worker_session()
+
+    while True:
+        try:
+            session.get(
+                ping_url,
+                params={"runpod_version": RUNPOD_VERSION},
+                timeout=interval * 2,
+            )
+        except requests.RequestException as exc:
+            LOGGER.warning("RunPod ping failed: %s", exc)
+        time.sleep(interval)
+
+
+def _poll_job() -> dict[str, Any] | None:
+    job_take_template = os.getenv("RUNPOD_WEBHOOK_GET_JOB", "")
+    if not job_take_template:
+        raise RuntimeError("RUNPOD_WEBHOOK_GET_JOB is not set")
+
+    job_take_url = _format_webhook_url(job_take_template)
+    separator = "&" if "?" in job_take_url else "?"
+    job_take_url = f"{job_take_url}{separator}job_in_progress=0"
+
+    response = _worker_session().get(job_take_url, timeout=90)
+    if response.status_code in {204, 400}:
+        return None
+    response.raise_for_status()
+
+    if not response.content:
+        return None
+
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Unexpected job payload: {payload}")
+    return payload
+
+
+def _post_job_result(job_id: str, payload: dict[str, Any]) -> None:
+    output_template = os.getenv("RUNPOD_WEBHOOK_POST_OUTPUT", "")
+    if not output_template:
+        raise RuntimeError("RUNPOD_WEBHOOK_POST_OUTPUT is not set")
+
+    output_url = _format_webhook_url(output_template, job_id=job_id)
+    separator = "&" if "?" in output_url else "?"
+    output_url = f"{output_url}{separator}isStream=false"
+
+    response = _worker_session().post(
+        output_url,
+        data=json.dumps(payload, ensure_ascii=False),
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "charset": "utf-8",
+            "X-Request-ID": job_id,
+        },
+        timeout=600,
+    )
+    response.raise_for_status()
+
+
+def _run_direct_worker_loop() -> None:
+    _bootstrap_log("direct worker loop entering")
+    LOGGER.info("Starting direct RunPod worker loop")
+
+    threading.Thread(target=_send_ping_forever, daemon=True).start()
+
+    while True:
+        try:
+            job = _poll_job()
+            if not job:
+                continue
+
+            job_id = str(job.get("id") or "")
+            if not job_id:
+                LOGGER.warning("Skipping job without id: %s", job)
+                continue
+
+            try:
+                result = handle_job(job)
+                payload: dict[str, Any] = {"output": result}
+            except Exception as exc:
+                error_info = {
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "error_traceback": traceback.format_exc(),
+                    "hostname": os.getenv("RUNPOD_POD_HOSTNAME", "unknown"),
+                    "worker_id": os.getenv("RUNPOD_POD_ID", "unknown"),
+                    "runpod_version": RUNPOD_VERSION,
+                }
+                payload = {"error": json.dumps(error_info)}
+
+            _post_job_result(job_id, payload)
+        except requests.RequestException as exc:
+            LOGGER.warning("Direct worker request failed: %s", exc)
+            time.sleep(2)
+        except Exception as exc:
+            LOGGER.exception("Direct worker loop failed: %s", exc)
+            time.sleep(2)
+
+
 if __name__ == "__main__":
-    _bootstrap_log("runpod serverless start entering")
-    try:
-        runpod.serverless.start({"handler": handle_job})
-        _bootstrap_log("runpod serverless start returned")
-    except Exception:
-        _bootstrap_log("runpod serverless start crashed\n" + traceback.format_exc())
-        raise
+    live_worker = LIVE_WORKER_ENV
+    if live_worker:
+        _run_direct_worker_loop()
+    else:
+        if runpod is None:
+            raise RuntimeError("runpod package is required outside the live worker environment")
+        _bootstrap_log("runpod serverless start entering")
+        try:
+            runpod.serverless.start({"handler": handle_job})
+            _bootstrap_log("runpod serverless start returned")
+        except Exception:
+            _bootstrap_log("runpod serverless start crashed\n" + traceback.format_exc())
+            raise
