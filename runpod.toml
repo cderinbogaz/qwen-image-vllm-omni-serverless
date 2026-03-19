@@ -1,0 +1,40 @@
+name = "qwen-image-vllm-omni"
+
+[project]
+base_image = "vllm/vllm-omni:v0.16.0"
+gpu_types = [
+    "NVIDIA H100 80GB HBM3",
+    "NVIDIA A100 80GB PCIe",
+]
+gpu_count = 1
+volume_mount_path = "/runpod-volume"
+ports = "22/tcp"
+container_disk_size_gb = 40
+
+[project.env_vars]
+POD_INACTIVITY_TIMEOUT = "120"
+RUNPOD_DEBUG_LEVEL = "info"
+LOG_LEVEL = "INFO"
+MODEL_CACHE_DIR = "/runpod-volume/model-cache"
+HF_HOME = "/runpod-volume/model-cache/huggingface"
+HF_HUB_CACHE = "/runpod-volume/model-cache/huggingface/hub"
+HUGGINGFACE_HUB_CACHE = "/runpod-volume/model-cache/huggingface/hub"
+TRANSFORMERS_CACHE = "/runpod-volume/model-cache/huggingface/transformers"
+VLLM_ASSETS_CACHE = "/runpod-volume/model-cache/vllm-assets"
+VLLM_MODEL = "Qwen/Qwen-Image-2512"
+VLLM_SERVER_ARGS = "--num-gpus 1 --vae-use-slicing --vae-use-tiling"
+VLLM_STARTUP_TIMEOUT = "3600"
+VLLM_REQUEST_TIMEOUT = "1800"
+DEFAULT_IMAGE_SIZE = "1328x1328"
+DEFAULT_NUM_INFERENCE_STEPS = "50"
+DEFAULT_TRUE_CFG_SCALE = "4.0"
+
+[endpoint]
+active_workers = 1
+max_workers = 1
+flashboot = true
+
+[runtime]
+python_version = "3.12"
+handler_path = "handler.py"
+requirements_path = "requirements.txt"

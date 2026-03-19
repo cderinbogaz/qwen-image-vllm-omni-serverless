@@ -1,0 +1,69 @@
+{
+  "title": "Qwen Image 2512 via vLLM-Omni",
+  "description": "Serverless Qwen Image worker that launches vLLM-Omni locally and serves the OpenAI-compatible image generation API through RunPod.",
+  "type": "serverless",
+  "category": "image",
+  "config": {
+    "runsOn": "GPU",
+    "endpointType": "LB",
+    "containerDiskInGb": 40,
+    "gpuCount": 1,
+    "gpuIds": "HOPPER_80,AMPERE_80",
+    "allowedCudaVersions": [
+      "12.9",
+      "12.8"
+    ],
+    "env": [
+      {
+        "key": "VLLM_MODEL",
+        "input": {
+          "type": "huggingface",
+          "name": "Model repo",
+          "description": "Hugging Face model repo to serve with vLLM-Omni.",
+          "default": "Qwen/Qwen-Image-2512",
+          "required": true
+        }
+      },
+      {
+        "key": "VLLM_SERVER_ARGS",
+        "input": {
+          "type": "string",
+          "name": "Server args",
+          "description": "Extra vLLM-Omni serve arguments.",
+          "default": "--num-gpus 1 --vae-use-slicing --vae-use-tiling",
+          "advanced": true
+        }
+      },
+      {
+        "key": "DEFAULT_IMAGE_SIZE",
+        "input": {
+          "type": "string",
+          "name": "Default image size",
+          "description": "Default output size in WIDTHxHEIGHT format.",
+          "default": "1328x1328",
+          "advanced": true
+        }
+      },
+      {
+        "key": "DEFAULT_NUM_INFERENCE_STEPS",
+        "input": {
+          "type": "number",
+          "name": "Default steps",
+          "description": "Default number of diffusion steps.",
+          "default": 50,
+          "advanced": true
+        }
+      },
+      {
+        "key": "DEFAULT_TRUE_CFG_SCALE",
+        "input": {
+          "type": "number",
+          "name": "Default true CFG scale",
+          "description": "Default Qwen-Image true CFG scale.",
+          "default": 4,
+          "advanced": true
+        }
+      }
+    ]
+  }
+}

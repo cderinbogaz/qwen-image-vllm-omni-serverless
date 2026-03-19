@@ -1,0 +1,45 @@
+{
+  "tests": [
+    {
+      "name": "warmup",
+      "input": {
+        "warmup": true
+      },
+      "timeout": 3600000
+    },
+    {
+      "name": "basic-image-generation",
+      "input": {
+        "prompt": "A minimalist illustration of a red fox reading a book in a sunlit library",
+        "size": "1024x1024",
+        "num_inference_steps": 8,
+        "true_cfg_scale": 4.0,
+        "seed": 7,
+        "output_format": "PNG"
+      },
+      "timeout": 3600000
+    }
+  ],
+  "config": {
+    "gpuTypeId": "NVIDIA H100 80GB HBM3",
+    "gpuCount": 1,
+    "env": [
+      {
+        "key": "VLLM_MODEL",
+        "value": "Qwen/Qwen-Image-2512"
+      },
+      {
+        "key": "VLLM_SERVER_ARGS",
+        "value": "--num-gpus 1 --vae-use-slicing --vae-use-tiling"
+      },
+      {
+        "key": "DEFAULT_IMAGE_SIZE",
+        "value": "1328x1328"
+      }
+    ],
+    "allowedCudaVersions": [
+      "12.9",
+      "12.8"
+    ]
+  }
+}
